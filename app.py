@@ -58,7 +58,14 @@ RESPONSE LENGTH — THIS IS CRITICAL:
 - Think WhatsApp chat, not email. Short. Conversational. Human.
 - If you have more to say, save it for the next message after they reply.
 
-IMPORTANT: Never introduce yourself or greet the patient again. They have already been welcomed. Jump straight into helping them with their inquiry.
+TONE — IMPORTANT FOR LAHORE:
+- Be warm and friendly, like a modern, approachable clinic coordinator — NOT stiff or overly formal.
+- Do NOT add "ji" after the patient's name in every message. Using the name occasionally is fine, but "Sohaib ji" on every line sounds old-fashioned and deferential. Sound like a friendly professional in their 20s-30s, not a formal secretary.
+- Use the patient's name sparingly — once or twice in a whole conversation at most, not every message.
+
+GREETING RULE — CRITICAL:
+- You greet the patient EXACTLY ONCE, at the very start. After that, NEVER greet again.
+- NEVER say "Assalam o Alaikum", "Hello", "Hi", or any greeting in the middle of a conversation — not even when the patient tells you their name. When they give their name, simply acknowledge it warmly and continue ("Thanks! ..." / "Shukriya! ...") — do NOT re-greet.
 
 CONVERSATION RULES:
 - Never just answer and stop. Always end with ONE relevant follow-up question.
@@ -346,6 +353,111 @@ def looks_roman_urdu(text):
     return hits >= 2 or (hits >= 1 and len(words) <= 4)
 
 
+import re
+
+def extract_phone(text):
+    """Return a cleaned phone number if the text looks like one, else None."""
+    if not text:
+        return None
+    digits = re.sub(r"[^\d+]", "", text)
+    # Pakistani numbers: 03xxxxxxxxx (11) or +923xxxxxxxxx / 00923... 
+    only_digits = re.sub(r"\D", "", digits)
+    if len(only_digits) >= 10:
+        return text.strip()
+    return None
+
+
+def start_booking(from_number, session, roman):
+    """Enter the structured booking flow. If we already have a name from the
+    conversation, skip straight to asking for the phone number."""
+    session["booking_stage"] = "awaiting_name"
+    session["booking_sent"] = True
+    if roman:
+        msg = "Bohat khoob! Slot confirm karne k liye aap apna naam bata dein."
+    else:
+        msg = "Wonderful! To confirm your slot, may I have your name please?"
+    send_text_message(from_number, msg)
+    schedule_followup_after_bot_message(from_number)
+
+
+def handle_booking_step(from_number, session, user_text, roman):
+    """Drive the booking state machine. Returns True if the message was handled
+    as part of booking (so the caller should NOT pass it to the open-ended AI)."""
+    stage = session.get("booking_stage")
+
+    if stage == "awaiting_name":
+        name = user_text.strip()
+        session["booking_name"] = name
+        session["booking_stage"] = "awaiting_phone"
+        first = name.split()[0] if name else ""
+        if roman:
+            msg = f"Shukriya{(' ' + first) if first else ''}! Aap apna contact number share kar dein, hamari team aap ko available timings bhej degi."
+        else:
+            msg = f"Thanks{(' ' + first) if first else ''}! Please share your contact number and our team will send you the available timings."
+        send_text_message(from_number, msg)
+        schedule_followup_after_bot_message(from_number)
+        return True
+
+    if stage == "awaiting_phone":
+        phone = extract_phone(user_text)
+        if not phone:
+            # didn't look like a number — ask once more, gently
+            if roman:
+                msg = "Bas aap ka contact number chahiye taake team timings bhej sakay — aap number likh dein?"
+            else:
+                msg = "I just need a contact number so our team can send timings — could you type it here?"
+            send_text_message(from_number, msg)
+            schedule_followup_after_bot_message(from_number)
+            return True
+        session["booking_phone"] = phone
+        session["booking_stage"] = "done"
+        first = (session.get("booking_name") or "").split()[0] if session.get("booking_name") else ""
+        # Single clean confirmation + close. No more questions, no loop.
+        if roman:
+            msg = (
+                f"Perfect{(', ' + first) if first else ''}! Aap ki request note ho gayi hai. ✅\n\n"
+                "Hamari team thori dair mein aap ko available timings bhej degi, aur consultation "
+                "humare doctor k saath hogi jo aap ko personalized plan denge.\n\nMilte hain jald! 🌸"
+            )
+        else:
+            msg = (
+                f"Perfect{(', ' + first) if first else ''}! Your request is noted. ✅\n\n"
+                "Our team will message you the available timings shortly, and your consultation "
+                "will be with our doctor who'll prepare a personalized plan for you.\n\nSee you soon! 🌸"
+            )
+        send_text_message(from_number, msg)
+        # Email the captured lead details
+        send_booking_lead_email(from_number, session)
+        return True
+
+    return False
+
+
+def send_booking_lead_email(from_number, session):
+    def _send():
+        try:
+            if not RESEND_API_KEY or not NOTIFY_EMAIL:
+                return
+            requests.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
+                json={
+                    "from": "RapidNexTech Bot <onboarding@resend.dev>",
+                    "to": [NOTIFY_EMAIL],
+                    "subject": f"✅ BOOKING REQUEST — {session.get('booking_name') or 'Unknown'}",
+                    "text": (
+                        f"A demo prospect completed the booking flow.\n\n"
+                        f"Name: {session.get('booking_name')}\n"
+                        f"Phone given: {session.get('booking_phone')}\n"
+                        f"WhatsApp: +{from_number} (https://wa.me/{from_number})\n"
+                    )
+                }
+            )
+        except Exception as e:
+            print(f"Booking lead email failed: {e}")
+    t = threading.Thread(target=_send); t.daemon = True; t.start()
+
+
 def handle_message(from_number, user_text, button_id=None):
     is_new_user = from_number not in conversation_store
 
@@ -358,6 +470,11 @@ def handle_message(from_number, user_text, button_id=None):
             "last_followup_time": 0,
             "booking_sent": False,
             "roman_urdu_mode": False,
+            # Structured booking flow: None -> "awaiting_name" -> "awaiting_phone" -> "done"
+            "booking_stage": None,
+            "booking_name": None,
+            "booking_phone": None,
+            "pending_book_ask": False,
         }
 
     session = conversation_store[from_number]
@@ -395,22 +512,10 @@ def handle_message(from_number, user_text, button_id=None):
             schedule_followup_after_bot_message(from_number)
             return
         elif button_id == "menu_book":
-            if roman:
-                msg = "Bilkul! Main aap k liye consultation slot confirm karwa deti hoon. Aap apna naam bata dein, hamari team timings abhi bhej degi 😊"
-            else:
-                msg = "Wonderful! I'll have our team confirm a consultation slot for you. May I take your name, and our team will message you the available timings shortly 😊"
-            send_text_message(from_number, msg)
-            session["booking_sent"] = True
-            schedule_followup_after_bot_message(from_number)
+            start_booking(from_number, session, roman)
             return
         elif button_id == "action_book":
-            if roman:
-                msg = "Bohat khoob! Main aap k liye slot confirm karwa deti hoon — aap apna naam bata dein 😊"
-            else:
-                msg = "Perfect! I'll have our team confirm a slot for you — may I take your name? 😊"
-            send_text_message(from_number, msg)
-            session["booking_sent"] = True
-            schedule_followup_after_bot_message(from_number)
+            start_booking(from_number, session, roman)
             return
         elif button_id == "action_more":
             if roman:
@@ -425,6 +530,40 @@ def handle_message(from_number, user_text, button_id=None):
     if not user_text:
         return
 
+    # If a structured booking is in progress, drive it and DO NOT pass the
+    # message to the open-ended AI (this is what stops the re-qualifying loop).
+    stage = session.get("booking_stage")
+    if stage in ("awaiting_name", "awaiting_phone"):
+        handle_booking_step(from_number, session, user_text, roman)
+        return
+    if stage == "done":
+        low = user_text.lower()
+        if any(w in low for w in ["no", "nahi", "nhi", "that's all", "thats all", "thanks", "thank you", "shukriya", "ok", "theek", "done"]):
+            return
+        ai_response = get_groq_response(user_text, session["history"])
+        session["history"].append({"role": "user", "content": user_text})
+        session["history"].append({"role": "assistant", "content": ai_response})
+        if len(session["history"]) > 10:
+            session["history"] = session["history"][-10:]
+        send_text_message(from_number, ai_response)
+        return
+
+    # If the PREVIOUS bot turn asked to book a slot, and the patient is now
+    # confirming ("yes"/"haan"), enter the structured booking flow directly —
+    # BEFORE calling the open-ended AI (which would otherwise freelance it).
+    if session.get("pending_book_ask"):
+        session["pending_book_ask"] = False
+        patient_confirming = (
+            user_text.strip().lower() in [
+                "yes", "yeah", "yep", "sure", "ok", "okay", "haan", "han", "ji", "jee",
+                "g", "bilkul", "yes please", "ji haan", "han ji", "haan ji",
+            ]
+            or any(p in user_text.lower() for p in ["yes book", "book me", "let's book", "lets book", "book kar", "kar dein", "kardo", "kar do"])
+        )
+        if patient_confirming and session.get("booking_stage") is None:
+            start_booking(from_number, session, roman)
+            return
+
     # AI response (language mirroring handled inside the system prompt)
     ai_response = get_groq_response(user_text, session["history"])
 
@@ -435,35 +574,27 @@ def handle_message(from_number, user_text, button_id=None):
 
     send_text_message(from_number, ai_response)
 
-    # Track booking intent from AI's own wording
-    if any(kw in ai_response.lower() for kw in [
-        "confirm a slot", "confirm your slot", "take your name", "team will message",
-        "slot confirm", "naam bata", "timings"
-    ]):
-        session["booking_sent"] = True
-
     schedule_followup_after_bot_message(from_number)
 
-    # Offer booking buttons ONLY on genuine high-intent — not on every mention
-    # of "consultation" (the AI says that constantly, which would spam buttons).
-    booking_already_sent = session.get("booking_sent", False)
+    # If the AI's reply asked to book/confirm a slot, remember it so the NEXT
+    # patient message ("yes") enters the structured booking flow.
+    ai_asked_to_book = any(kw in ai_response.lower() for kw in [
+        "shall i have our team", "shall i book", "book a slot", "confirm a slot",
+        "may i have your name", "may i take your name", "slot confirm", "naam bata",
+        "slot book kar", "consultation book kar",
+    ])
+    session["pending_book_ask"] = ai_asked_to_book
 
-    # Strong intent phrases in the PATIENT's message (not the AI's reply).
+    # Offer booking buttons ONLY on genuine high-intent in the PATIENT's own
+    # message (not on every mention of "consultation").
+    booking_already_sent = session.get("booking_sent", False)
     strong_intent_phrases = [
         "book", "appointment", "schedule", "i want to", "i'd like to",
         "ready to", "sign me up", "let's do", "lets do",
-        "book karna", "appointment chahiye", "slot", "kab a", "kab aaun",
-        "naam", "confirm kar", "ho jaye ga", "ho jayega",
+        "book karna", "appointment chahiye", "kab a", "kab aaun",
     ]
     patient_strong_intent = any(p in user_text.lower() for p in strong_intent_phrases)
-
-    # The AI explicitly moving toward booking (its own wording).
-    ai_moving_to_book = any(kw in ai_response.lower() for kw in [
-        "confirm a slot", "shall i have our team", "take your name",
-        "slot confirm", "naam bata", "best next step",
-    ])
-
-    if (patient_strong_intent or ai_moving_to_book) and not booking_already_sent:
+    if patient_strong_intent and not booking_already_sent and session.get("booking_stage") is None and not ai_asked_to_book:
         send_booking_prompt(from_number, roman)
 
 
