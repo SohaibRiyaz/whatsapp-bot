@@ -367,11 +367,52 @@ def extract_phone(text):
     return None
 
 
-def start_booking(from_number, session, roman):
-    """Enter the structured booking flow. If we already have a name from the
-    conversation, skip straight to asking for the phone number."""
-    session["booking_stage"] = "awaiting_name"
+def extract_inline_name(text):
+    """Pull a name out of a message like 'g zroor, mera naam Sohaib hai' or
+    'my name is Ali'. Returns the name or None if not confidently found."""
+    if not text:
+        return None
+    t = text.strip()
+    low = t.lower()
+    # Common name-introduction patterns (Roman Urdu + English)
+    patterns = [
+        r"mera naam\s+([a-z\u00c0-\u017f\.\s]+?)\s+(?:hai|h)\b",
+        r"mera naam\s+([a-z\u00c0-\u017f\.\s]+)$",
+        r"naam\s+([a-z\u00c0-\u017f\.\s]+?)\s+(?:hai|h)\b",
+        r"my name is\s+([a-z\u00c0-\u017f\.\s]+)$",
+        r"i am\s+([a-z\u00c0-\u017f\.\s]+)$",
+        r"i'?m\s+([a-z\u00c0-\u017f\.\s]+)$",
+        r"this is\s+([a-z\u00c0-\u017f\.\s]+)$",
+    ]
+    for pat in patterns:
+        m = re.search(pat, low)
+        if m:
+            # map back to original casing using the span
+            span = m.span(1)
+            name = t[span[0]:span[1]].strip(" ,.")
+            # keep it sane: 1-3 words, letters only
+            words = name.split()
+            if 1 <= len(words) <= 3 and all(w.replace(".", "").isalpha() for w in words):
+                return name.title()
+    return None
+
+
+def start_booking(from_number, session, roman, prefilled_name=None):
+    """Enter the structured booking flow. If a name was already provided in the
+    confirming message, skip straight to asking for the phone number."""
     session["booking_sent"] = True
+    if prefilled_name:
+        session["booking_name"] = prefilled_name
+        session["booking_stage"] = "awaiting_phone"
+        first = prefilled_name.split()[0]
+        if roman:
+            msg = f"Shukriya {first}! Aap apna contact number share kar dein, hamari team aap ko available timings bhej degi."
+        else:
+            msg = f"Thanks {first}! Please share your contact number and our team will send you the available timings."
+        send_text_message(from_number, msg)
+        schedule_followup_after_bot_message(from_number)
+        return
+    session["booking_stage"] = "awaiting_name"
     if roman:
         msg = "Bohat khoob! Slot confirm karne k liye aap apna naam bata dein."
     else:
@@ -386,7 +427,12 @@ def handle_booking_step(from_number, session, user_text, roman):
     stage = session.get("booking_stage")
 
     if stage == "awaiting_name":
-        name = user_text.strip()
+        # Patient might type "mera naam Sohaib hai" or just "Sohaib"
+        extracted = extract_inline_name(user_text)
+        name = extracted if extracted else user_text.strip()
+        # guard against accidental long sentences as a name
+        if len(name.split()) > 4:
+            name = name.split()[0]
         session["booking_name"] = name
         session["booking_stage"] = "awaiting_phone"
         first = name.split()[0] if name else ""
@@ -456,6 +502,32 @@ def send_booking_lead_email(from_number, session):
         except Exception as e:
             print(f"Booking lead email failed: {e}")
     t = threading.Thread(target=_send); t.daemon = True; t.start()
+
+
+def is_pure_ack(text):
+    """True if the message is just an acknowledgment with no question/request —
+    e.g. 'ok', 'thanks', 'thk hai', 'done', 'noted', 'g'. Lets the bot stay
+    silent instead of replying to every little 'ok'."""
+    if not text:
+        return True
+    low = text.strip().lower()
+    if "?" in low:
+        return False
+    question_markers = {"kya", "kaise", "kab", "kitna", "kitne", "kaisay", "how", "what",
+                        "when", "where", "why", "which", "can", "do", "does", "kahan", "kyun", "konsa", "kon"}
+    tokens = set(low.replace(",", " ").replace(".", " ").replace("!", " ").split())
+    if tokens & question_markers:
+        return False
+    ack_words = {
+        "ok", "okay", "okk", "k", "kk", "thanks", "thank", "thankyou", "thx", "ty",
+        "done", "noted", "got", "it", "cool", "great", "nice", "good", "perfect",
+        "shukriya", "shukria", "theek", "thik", "thk", "hai", "hain", "g", "ji", "jee",
+        "acha", "achha", "accha", "haan", "han", "yes", "alright", "fine", "sahi",
+        "bilkul", "awesome", "👍", "🙏", "❤", "😊", "ok.", "great.",
+    }
+    if tokens and tokens.issubset(ack_words):
+        return True
+    return False
 
 
 def handle_message(from_number, user_text, button_id=None):
@@ -537,9 +609,11 @@ def handle_message(from_number, user_text, button_id=None):
         handle_booking_step(from_number, session, user_text, roman)
         return
     if stage == "done":
-        low = user_text.lower()
-        if any(w in low for w in ["no", "nahi", "nhi", "that's all", "thats all", "thanks", "thank you", "shukriya", "ok", "theek", "done"]):
+        # Booking is complete. Stay SILENT on pure acknowledgments ("ok",
+        # "thanks", "thk hai") — a real coordinator wouldn't keep replying.
+        if is_pure_ack(user_text):
             return
+        # Only respond if they genuinely ask something new — once, briefly.
         ai_response = get_groq_response(user_text, session["history"])
         session["history"].append({"role": "user", "content": user_text})
         session["history"].append({"role": "assistant", "content": ai_response})
@@ -549,19 +623,31 @@ def handle_message(from_number, user_text, button_id=None):
         return
 
     # If the PREVIOUS bot turn asked to book a slot, and the patient is now
-    # confirming ("yes"/"haan"), enter the structured booking flow directly —
-    # BEFORE calling the open-ended AI (which would otherwise freelance it).
+    # confirming ("yes"/"haan"/"g zroor"), enter the structured booking flow
+    # directly — BEFORE calling the open-ended AI (which would otherwise loop).
     if session.get("pending_book_ask"):
         session["pending_book_ask"] = False
+        low = user_text.strip().lower()
+        confirm_words = [
+            "yes", "yeah", "yep", "sure", "ok", "okay", "haan", "han", "ji", "jee",
+            "g", "bilkul", "zaroor", "zroor", "zarur", "theek", "thik", "kardo", "kar do",
+            "kardein", "kar dein", "krdo", "krdein", "please",
+        ]
+        confirm_phrases = [
+            "yes book", "book me", "let's book", "lets book", "book kar", "g zroor",
+            "ji haan", "han ji", "haan ji", "g haan", "haan zaroor", "bilkul zaroor",
+            "kar dein", "kar do", "yes please",
+        ]
+        # token-level match (so "g zroor mera naam..." still counts as confirming)
+        tokens = set(low.replace(",", " ").replace(".", " ").split())
         patient_confirming = (
-            user_text.strip().lower() in [
-                "yes", "yeah", "yep", "sure", "ok", "okay", "haan", "han", "ji", "jee",
-                "g", "bilkul", "yes please", "ji haan", "han ji", "haan ji",
-            ]
-            or any(p in user_text.lower() for p in ["yes book", "book me", "let's book", "lets book", "book kar", "kar dein", "kardo", "kar do"])
+            bool(tokens & set(confirm_words))
+            or any(p in low for p in confirm_phrases)
         )
         if patient_confirming and session.get("booking_stage") is None:
-            start_booking(from_number, session, roman)
+            # The same message might ALSO contain the name ("g zroor, mera naam Sohaib hai")
+            inline_name = extract_inline_name(user_text)
+            start_booking(from_number, session, roman, prefilled_name=inline_name)
             return
 
     # AI response (language mirroring handled inside the system prompt)
@@ -578,11 +664,17 @@ def handle_message(from_number, user_text, button_id=None):
 
     # If the AI's reply asked to book/confirm a slot, remember it so the NEXT
     # patient message ("yes") enters the structured booking flow.
-    ai_asked_to_book = any(kw in ai_response.lower() for kw in [
-        "shall i have our team", "shall i book", "book a slot", "confirm a slot",
-        "may i have your name", "may i take your name", "slot confirm", "naam bata",
-        "slot book kar", "consultation book kar",
-    ])
+    al = ai_response.lower()
+    ai_asked_to_book = (
+        any(kw in al for kw in [
+            "shall i have our team", "shall i book", "book a slot", "confirm a slot",
+            "may i have your name", "may i take your name", "slot confirm", "naam bata",
+            "slot book kar", "consultation book kar",
+        ])
+        # natural phrasings: "would you like to book a consultation / appointment"
+        or ("book" in al and ("consultation" in al or "appointment" in al or "slot" in al))
+        or ("would you like" in al and ("consultation" in al or "appointment" in al))
+    )
     session["pending_book_ask"] = ai_asked_to_book
 
     # Offer booking buttons ONLY on genuine high-intent in the PATIENT's own
