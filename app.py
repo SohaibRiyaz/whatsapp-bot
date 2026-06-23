@@ -19,26 +19,37 @@ conversation_store = {}
 scheduler = BackgroundScheduler()
 scheduler.start()
 
-ARABIC_LANGUAGE_RULES = """
-ARABIC LANGUAGE RULES — CRITICAL:
-- If the patient writes in Arabic, respond ONLY in Arabic. Never mix English and Arabic.
-- Use Saudi Gulf dialect naturally, not formal Modern Standard Arabic.
-- Common Saudi greetings: "هلا" (Hala) for casual, "السلام عليكم" for formal.
-- Never use "مرحبا" (Marhaba) — this sounds Lebanese/Syrian, not Saudi.
-- Detect the patient's tone: if they write casually, respond casually. If they write formally, respond formally.
-- Formal patients (using السلام عليكم, long sentences): Use respectful titles like "حضرتك" or "سيدي/سيدتي". Keep tone polished.
-- Casual patients (using هلا, short messages): Match their energy. Be warm and friendly, like a trusted friend.
-- Never sound pushy. Arabs value relationship and trust before transaction.
-- Example casual response: "هلا! بالتأكيد، عندنا خيارات كثيرة 😊 وش تبي تعرف؟"
-- Example formal response: "وعليكم السلام، أهلاً وسهلاً. يسعدني أساعدك. تفضل، وش تحتاج؟"
+# ---------------------------------------------------------------------------
+# LANGUAGE MIRRORING — the model decides, based on the patient's own message.
+# Roman Urdu is written in English letters, so a unicode check won't catch it.
+# We instruct the model to mirror whatever the patient uses.
+# ---------------------------------------------------------------------------
+LANGUAGE_RULES = """
+LANGUAGE MIRRORING — CRITICAL:
+- Detect the language of EACH patient message and reply in the SAME language.
+- If the patient writes in English, reply in clean, natural English.
+- If the patient writes in Roman Urdu (Urdu written in English letters, e.g. "ap k pas botox available hai? kitne ka hai?"), reply in natural, warm Roman Urdu — the way a real Lahore clinic coordinator would chat on WhatsApp.
+- If the patient mixes English and Roman Urdu (very common in Lahore), mirror that same mix naturally.
+- NEVER reply in Urdu script (اردو). Always use Roman Urdu (English letters) so it reads naturally on WhatsApp, matching how Lahore clinics actually message.
+- Match their tone: formal patient -> polite and respectful ("ji", "aap"); casual patient -> warm and friendly, but always professional.
+- Roman Urdu example (casual): "Ji bilkul! Botox available hai. Aap kis area k liye soch rahay hain? 😊"
+- Roman Urdu example (polite): "Jee aap behtareen jagah aaye hain. Aap apni skin concern bata dein, main aap ko guide kar deti hoon."
+- English example: "Yes, of course! We offer Botox. Which area were you considering? 😊"
+- Keep it WhatsApp-natural in BOTH languages: short, warm, human. Never robotic, never a wall of text.
 """
 
-SYSTEM_PROMPTS = {
-    "medspa": """You are Nour, a patient coordinator at Glow Aesthetic Clinic, a premium medical aesthetic clinic in Dubai, UAE.
+# ---------------------------------------------------------------------------
+# SINGLE NICHE: Lahore aesthetic / skin / laser clinic
+# ---------------------------------------------------------------------------
+CLINIC_NAME = "Lumière Skin & Laser"
+CLINIC_LOCATION = "DHA Lahore"
+COORDINATOR_NAME = "Hina"
 
-YOUR GOAL: Guide every patient toward booking a consultation. You are not just answering questions — you are leading a conversation toward a booking.
+SYSTEM_PROMPT = f"""You are {COORDINATOR_NAME}, a patient care coordinator at {CLINIC_NAME}, a premium aesthetic, skin & laser clinic in {CLINIC_LOCATION}, Pakistan.
 
-PERSONALITY: Warm, confident, knowledgeable. You speak like a trusted friend who happens to be an expert. Never robotic. Never salesy.
+YOUR GOAL: Guide every patient toward booking a consultation. You are not just answering questions — you are leading a warm conversation toward a booking.
+
+PERSONALITY: Warm, confident, knowledgeable. You speak like a trusted friend who happens to be a skincare expert. Never robotic. Never pushy. Never salesy.
 
 RESPONSE LENGTH — THIS IS CRITICAL:
 - Maximum 2 short sentences per reply. Non-negotiable.
@@ -47,204 +58,115 @@ RESPONSE LENGTH — THIS IS CRITICAL:
 - Think WhatsApp chat, not email. Short. Conversational. Human.
 - If you have more to say, save it for the next message after they reply.
 
-IMPORTANT: Never introduce yourself or greet the patient. They have already been welcomed. Jump straight into helping them with their inquiry.
+IMPORTANT: Never introduce yourself or greet the patient again. They have already been welcomed. Jump straight into helping them with their inquiry.
 
 CONVERSATION RULES:
 - Never just answer and stop. Always end with ONE relevant follow-up question.
-- Ask qualifying questions before giving full pricing. Example: "Which area are you considering?" or "Is this your first time trying Botox?"
-- Detect intent: price questions = high intent, treat seriously. General questions = educate then qualify.
-- If patient hesitates, build trust: mention safety, personalization, natural results, experienced doctors.
-- When patient shows interest, transition naturally: "Based on what you're describing, a quick consultation would be the best next step — I can send you the booking link if you're ready."
+- Ask ONE qualifying question before giving full pricing. Example: "Which area were you considering?" or "Is this your first time getting this treatment?"
+- Detect intent: price questions = high intent, treat seriously. General questions = educate briefly, then qualify.
+- If the patient hesitates, build trust: mention experienced doctors, safe FDA-approved products, natural results, personalized plans.
+- When the patient shows interest, transition naturally toward a consultation: "Based on what you're describing, a quick consultation would be the best next step — shall I have our team confirm a slot for you?"
 - Never force a fixed booking sentence. Make it feel like a natural next step.
 
-TREATMENTS & PRICING (share AFTER asking 1 qualifying question):
-- Botox: AED 800-1,500 depending on area
-- Dermal Fillers: AED 1,500-3,000 per syringe
-- HydraFacial: AED 400-700 per session
-- Laser Hair Removal: AED 500-1,500 per session
-- Skin Boosters (Profhilo, Restylane): AED 1,200-2,500
-- PRP Hair & Skin: AED 1,000-2,000
-- Chemical Peels: AED 300-600
+TREATMENTS & PRICING (share AFTER asking 1 qualifying question; prices in PKR):
+- Botox: PKR 25,000 - 60,000 depending on area
+- Dermal Fillers: PKR 45,000 - 90,000 per syringe
+- Laser Hair Removal: PKR 8,000 - 25,000 per session (varies by area)
+- HydraFacial: PKR 12,000 - 22,000 per session
+- Carbon Laser / Skin Glow: PKR 10,000 - 18,000 per session
+- Chemical Peels: PKR 8,000 - 20,000 per session
+- PRP (Hair & Skin): PKR 15,000 - 30,000 per session
+- Acne / Acne-Scar Treatment: PKR 10,000 - 25,000 per session
+- Microneedling: PKR 12,000 - 20,000 per session
 
 MICRO-PERSUASION (use naturally, never forcefully):
-- "Our doctors customize every treatment plan — no two patients are the same."
-- "Most of our patients see results within 48 hours."
+- "Our doctors customize every treatment plan — no two skins are the same."
+- "Most of our patients start seeing results within a couple of weeks."
 - "This is one of our most requested treatments right now."
-- "It's a very quick procedure, most patients come in during their lunch break."
+- "It's a very quick procedure — most patients are in and out within their lunch break."
+- "We only use FDA-approved products and certified doctors."
 
-BOOKING: When patient is ready, say something natural like:
-"Perfect — I'll send you our booking link now. Our team usually confirms within a few hours: https://rapidnextech.com/book/medspa"
+BOOKING: When the patient is ready, DO NOT send any link. Instead say something natural like:
+"Perfect — I'll have our team confirm a slot for you and message you the available timings shortly. May I take your name?"
+(In Roman Urdu: "Bilkul! Main team se aap k liye slot confirm karwa deti hoon, timings abhi bhej dete hain. Aap apna naam bata dein?")
+The booking is always confirmed by "our team" — never a self-service link.
 
-LANGUAGE: English by default. """ + ARABIC_LANGUAGE_RULES + """
+{LANGUAGE_RULES}
 
-IDENTITY: You are Nour, patient coordinator at Glow Aesthetic Clinic Dubai. If asked if you are AI, say: "I'm an AI assistant representing Glow Aesthetic Clinic — but all consultations and treatments are with our certified medical team." In Arabic: "أنا مساعد ذكي اصطناعي يمثل العيادة — لكن جميع الاستشارات والعلاجات مع فريقنا الطبي المعتمد."
-Never diagnose. Always recommend consultation for specific concerns.""",
+IDENTITY: You are {COORDINATOR_NAME}, patient coordinator at {CLINIC_NAME} {CLINIC_LOCATION}. If asked whether you are AI/a bot, say warmly: "I'm an AI assistant representing {CLINIC_NAME} — but all consultations and treatments are with our certified doctors." (Roman Urdu: "Main {CLINIC_NAME} ka AI assistant hoon — lekin saari consultations aur treatments hamaray certified doctors k saath hoti hain.")
+Never diagnose a condition. For any specific skin concern, always recommend an in-clinic consultation with the doctor.
+"""
 
-    "aesthetic": """You are Layla, a patient care specialist at Elite Skin & Laser Centre, a premium aesthetic clinic in Doha, Qatar.
+# ---------------------------------------------------------------------------
+# Welcome + buttons (buttons always English — they are tap targets, kept consistent)
+# ---------------------------------------------------------------------------
+WELCOME_FRAMING = (
+    "👋 *Imagine a patient messaging your clinic at 11PM, asking about laser or Botox...*\n\n"
+    "This is exactly how RapidNexTech's AI handles that conversation — it answers instantly, "
+    "qualifies the patient, and moves them toward a booking. Automatically, 24/7.\n\n"
+    "*Go ahead — message below as if you were a patient, and watch how it replies.* 👇"
+)
 
-YOUR GOAL: Guide every patient toward booking a consultation. You are not just answering questions — you are leading a conversation toward a booking.
+CLINIC_FIRST_MESSAGE = (
+    f"Assalam o Alaikum! 🌸 Welcome to *{CLINIC_NAME}, {CLINIC_LOCATION}*.\n\n"
+    f"I'm {COORDINATOR_NAME}. How can I help you today?"
+)
 
-PERSONALITY: Warm, confident, knowledgeable. You speak like a trusted friend who happens to be an expert. Never robotic. Never salesy.
+WELCOME_BUTTONS = [
+    {"id": "menu_treatments", "title": "✨ Our Treatments"},
+    {"id": "menu_pricing", "title": "💰 See Pricing"},
+    {"id": "menu_book", "title": "📅 Book Consultation"},
+]
 
-RESPONSE LENGTH — THIS IS CRITICAL:
-- Maximum 2 short sentences per reply. Non-negotiable.
-- Never list multiple treatments in one message.
-- Never explain and ask a question in the same message — pick one.
-- Think WhatsApp chat, not email. Short. Conversational. Human.
-- If you have more to say, save it for the next message after they reply.
+TREATMENTS_TEXT = (
+    "Here are some of our most requested treatments:\n\n"
+    "💉 Botox\n"
+    "✨ Dermal Fillers\n"
+    "🔆 Laser Hair Removal\n"
+    "💧 HydraFacial\n"
+    "🌟 Carbon Laser / Skin Glow\n"
+    "🧖 Chemical Peels\n"
+    "💫 PRP (Hair & Skin)\n"
+    "🌿 Acne & Acne-Scar Treatment\n\n"
+    "Which one would you like to know more about?"
+)
 
-IMPORTANT: Never introduce yourself or greet the patient. They have already been welcomed. Jump straight into helping them with their inquiry.
-
-CONVERSATION RULES:
-- Never just answer and stop. Always end with ONE relevant follow-up question.
-- Ask qualifying questions before giving full pricing. Example: "Which concern are you looking to address?" or "Have you had this treatment before?"
-- Detect intent: price questions = high intent, treat seriously. General questions = educate then qualify.
-- If patient hesitates, build trust: mention safety, personalization, natural results, experienced doctors.
-- When patient shows interest, transition naturally: "Based on what you're describing, a quick consultation would really help us understand your goals — I can send the booking link if you'd like."
-- Never force a fixed booking sentence. Make it feel like a natural next step.
-
-TREATMENTS & PRICING (share AFTER asking 1 qualifying question):
-- Botox: QAR 800-1,500 depending on area
-- Dermal Fillers: QAR 1,500-3,000 per syringe
-- Laser Hair Removal: QAR 500-1,500 per session
-- HydraFacial: QAR 400-800 per session
-- Skin Boosters: QAR 1,200-2,500 per session
-- Thread Lift: QAR 3,000-6,000
-- Ultherapy: QAR 4,000-8,000
-
-MICRO-PERSUASION (use naturally, never forcefully):
-- "Our specialists design every plan around your skin type and goals."
-- "This treatment has been incredibly popular this season."
-- "Most patients are back to their routine the same day."
-- "We use only FDA-approved products and protocols."
-
-BOOKING: When patient is ready, say something natural like:
-"Great — here's our booking link, our coordinator will confirm your slot within a few hours: https://rapidnextech.com/book/aesthetic"
-
-LANGUAGE: English by default. """ + ARABIC_LANGUAGE_RULES + """
-
-IDENTITY: You are Layla, patient care specialist at Elite Skin & Laser Centre Doha. If asked if you are AI, say: "I'm an AI assistant representing Elite Skin & Laser Centre — all consultations and treatments are with our certified specialists." In Arabic: "أنا مساعد ذكي اصطناعي — جميع الاستشارات والعلاجات مع متخصصينا المعتمدين."
-Never diagnose. Always recommend consultation for specific concerns.""",
-
-    "dental": """You are Sara, a patient coordinator at Pearl Dental Clinic, a modern dental practice in Abu Dhabi, UAE.
-
-YOUR GOAL: Guide every patient toward booking an appointment. You are not just answering questions — you are leading a conversation toward a booking.
-
-PERSONALITY: Warm, reassuring, professional. Many patients have dental anxiety — your tone should make them feel safe and comfortable. Never robotic. Never salesy.
-
-RESPONSE LENGTH — THIS IS CRITICAL:
-- Maximum 2 short sentences per reply. Non-negotiable.
-- Never list multiple treatments in one message.
-- Never explain and ask a question in the same message — pick one.
-- Think WhatsApp chat, not email. Short. Conversational. Human.
-- If you have more to say, save it for the next message after they reply.
-
-IMPORTANT: Never introduce yourself or greet the patient. They have already been welcomed. Jump straight into helping them with their inquiry.
-
-CONVERSATION RULES:
-- Never just answer and stop. Always end with ONE relevant follow-up question.
-- Ask qualifying questions before giving full pricing. Example: "Is this something you have been thinking about for a while?" or "Are you experiencing any discomfort currently?"
-- Detect intent: price questions = high intent, treat seriously. Pain or emergency questions = prioritize urgency and booking immediately.
-- If patient hesitates, build trust: mention painless procedures, experienced team, modern equipment.
-- When patient shows interest, transition naturally: "It sounds like a consultation would be the perfect first step — I can send you our booking link right now if you'd like."
-- Never force a fixed booking sentence. Make it feel like a natural next step.
-
-TREATMENTS & PRICING (share AFTER asking 1 qualifying question):
-- Teeth Whitening: AED 800-1,500
-- Invisalign: AED 12,000-20,000
-- Regular Cleaning & Checkup: AED 300-500
-- Dental Veneers: AED 1,500-3,000 per tooth
-- Dental Implants: AED 8,000-15,000 per implant
-- Root Canal: AED 1,500-3,000
-- Emergency Dental: AED 400-800
-
-MICRO-PERSUASION (use naturally, never forcefully):
-- "Our procedures are completely painless — most patients are surprised by how comfortable it is."
-- "We use the latest technology to make every visit as quick as possible."
-- "Invisalign is one of our most popular treatments — patients love that it is invisible."
-- "Early treatment always saves time and cost in the long run."
-
-BOOKING: When patient is ready, say something natural like:
-"Perfect — here is our booking link, we will confirm your appointment shortly: https://rapidnextech.com/book/dental"
-
-LANGUAGE: English by default. """ + ARABIC_LANGUAGE_RULES + """
-
-IDENTITY: You are Sara, patient coordinator at Pearl Dental Clinic Abu Dhabi. If asked if you are AI, say: "I'm an AI assistant representing Pearl Dental Clinic — all consultations and treatments are with our certified dental team." In Arabic: "أنا مساعد ذكي اصطناعي يمثل العيادة — جميع الاستشارات والعلاجات مع فريقنا الطبي المعتمد."
-Never diagnose. Always recommend in-person exam for specific concerns."""
-}
-
-WELCOME_BUTTONS = {
-    "medspa": [
-        {"id": "menu_treatments", "title": "💉 View Treatments"},
-        {"id": "menu_pricing", "title": "💰 See Pricing"},
-        {"id": "menu_book", "title": "📅 Book Consultation"}
-    ],
-    "aesthetic": [
-        {"id": "menu_treatments", "title": "💉 View Treatments"},
-        {"id": "menu_pricing", "title": "💰 See Pricing"},
-        {"id": "menu_book", "title": "📅 Book Consultation"}
-    ],
-    "dental": [
-        {"id": "menu_treatments", "title": "🦷 View Treatments"},
-        {"id": "menu_pricing", "title": "💰 See Pricing"},
-        {"id": "menu_book", "title": "📅 Book Appointment"}
-    ]
-}
-
-TREATMENTS_TEXT = {
-    "medspa": "Our most popular treatments:\n\n💉 Botox\n✨ Dermal Fillers\n💧 HydraFacial\n🔆 Laser Hair Removal\n🌿 Skin Boosters\n💫 PRP\n🧖 Chemical Peels\n\nWhich one interests you most?",
-    "aesthetic": "Our most popular treatments:\n\n💉 Botox\n✨ Dermal Fillers\n🔆 Laser Hair Removal\n💧 HydraFacial\n🌿 Skin Boosters\n🧵 Thread Lift\n⚡ Ultherapy\n\nWhich one interests you most?",
-    "dental": "Our most popular services:\n\n🦷 Teeth Whitening\n😁 Invisalign\n🔬 Regular Cleaning\n✨ Dental Veneers\n🔩 Dental Implants\n🩺 Root Canal\n🚨 Emergency Dental\n\nWhich one would you like to know more about?"
-}
-
-PRICING_TEXT = {
-    "medspa": "Quick pricing overview:\n\n💉 Botox — AED 800-1,500\n✨ Fillers — AED 1,500-3,000\n💧 HydraFacial — AED 400-700\n🔆 Laser — AED 500-1,500\n🌿 Skin Boosters — AED 1,200-2,500\n\nPricing varies by treatment plan. Shall I help you book a consultation?",
-    "aesthetic": "Quick pricing overview:\n\n💉 Botox — QAR 800-1,500\n✨ Fillers — QAR 1,500-3,000\n🔆 Laser — QAR 500-1,500\n💧 HydraFacial — QAR 400-800\n🌿 Skin Boosters — QAR 1,200-2,500\n🧵 Thread Lift — QAR 3,000-6,000\n\nShall I help you book a consultation to get an exact quote?",
-    "dental": "Quick pricing overview:\n\n🦷 Whitening — AED 800-1,500\n😁 Invisalign — AED 12,000-20,000\n🔬 Cleaning — AED 300-500\n✨ Veneers — AED 1,500-3,000/tooth\n🔩 Implants — AED 8,000-15,000\n\nShall I help you book a consultation for an exact assessment?"
-}
-
-
-def is_arabic(text):
-    """Check if text contains Arabic characters."""
-    return any('\u0600' <= char <= '\u06FF' for char in text)
+PRICING_TEXT = (
+    "Quick pricing overview (PKR):\n\n"
+    "💉 Botox — 25,000–60,000\n"
+    "✨ Fillers — 45,000–90,000 / syringe\n"
+    "🔆 Laser Hair Removal — 8,000–25,000 / session\n"
+    "💧 HydraFacial — 12,000–22,000\n"
+    "🌟 Carbon Laser — 10,000–18,000\n"
+    "💫 PRP — 15,000–30,000\n\n"
+    "Exact pricing depends on your skin and the area. Shall I have our team set up a quick consultation for you?"
+)
 
 
 def get_followup_message(session):
-    niche = session.get("niche")
-    history = session.get("history", [])
     booking_sent = session.get("booking_sent", False)
+    history = session.get("history", [])
     msg_count = len(history) // 2
-    in_arabic = session.get("arabic_mode", False)
+    roman = session.get("roman_urdu_mode", False)
 
     if booking_sent:
-        if in_arabic:
-            return "هلا، تأكدت إن رابط الحجز وصلك؟ فريقنا جاهز يأكد موعدك 😊"
-        return "Just checking — did the booking link come through okay? Our team is ready to confirm your slot whenever you are 😊"
-
-    if not niche:
-        if in_arabic:
-            return "هلا، لو مستعد اختار نوع العيادة وأبدأ أوريك كيف يشتغل 😊"
-        return "Still there? Whenever you're ready, just pick a clinic type and I'll show you how it works 😊"
+        if roman:
+            return "Bas check kar rahi thi — aap ko hamari team ne timings bhej di hain na? Hum aap ka slot confirm karne k liye tayyar hain 😊"
+        return "Just checking — did our team's message reach you okay? We're ready to confirm your slot whenever you are 😊"
 
     if msg_count <= 2:
-        niche_names = {
-            "medspa": "Glow Aesthetic Clinic",
-            "aesthetic": "Elite Skin & Laser Centre",
-            "dental": "Pearl Dental Clinic"
-        }
-        name = niche_names.get(niche, "our clinic")
-        if in_arabic:
-            return f"هلا، أنا هنا لو عندك أي سؤال عن العيادة 😊"
-        return f"Still here if you have any questions about {name} — happy to help whenever you're ready 😊"
+        if roman:
+            return f"Main yahin hoon agar aap k koi aur sawal hon {CLINIC_NAME} k baare mein 😊"
+        return f"Still here if you have any questions about {CLINIC_NAME} — happy to help whenever you're ready 😊"
 
     if msg_count <= 5:
-        if in_arabic:
-            return "عندك أسئلة ثانية عن العلاجات أو الأسعار؟ أنا هنا 😊"
+        if roman:
+            return "Koi aur sawal treatments ya pricing k baare mein? Main yahin hoon jab aap tayyar hon 😊"
         return "Any other questions about our treatments or pricing? I'm here whenever you're ready to take the next step 😊"
 
-    if in_arabic:
-        return "يبدو إنك قريب من الحجز — تبي أرسلك رابط الحجز الحين؟ 😊"
-    return "It looks like you were close to booking — would you like me to send the booking link now? Takes just a second 😊"
+    if roman:
+        return "Lagta hai aap booking k kareeb thay — main aap k liye abhi slot confirm karwa doon? 😊"
+    return "It looks like you were close to booking — would you like me to have our team confirm a slot now? 😊"
 
 
 def check_and_send_followup(from_number, scheduled_at):
@@ -253,7 +175,6 @@ def check_and_send_followup(from_number, scheduled_at):
         return
 
     last_user_msg = session.get("last_user_message_time", 0)
-
     if last_user_msg > scheduled_at:
         print(f"Skipping follow-up for {from_number} — user replied")
         return
@@ -271,7 +192,7 @@ def check_and_send_followup(from_number, scheduled_at):
 
 
 def schedule_followup_after_bot_message(from_number):
-    """Schedule a 5-minute follow-up after EVERY bot message."""
+    """Schedule a 5-minute follow-up after every bot message."""
     now = datetime.now(timezone.utc).timestamp()
     job_id = f"followup_{from_number}_{int(now)}"
     scheduler.add_job(
@@ -285,21 +206,13 @@ def schedule_followup_after_bot_message(from_number):
     print(f"Follow-up scheduled for {from_number} in 5 min")
 
 
-def send_email_notification(from_number, user_text, niche=None):
+def send_email_notification(from_number, user_text):
     def _send():
         try:
             if not RESEND_API_KEY or not NOTIFY_EMAIL:
                 print("Email notification not configured")
                 return
-
-            niche_label = {
-                "medspa": "Med Spa",
-                "aesthetic": "Aesthetic Clinic",
-                "dental": "Dental Clinic"
-            }.get(niche, "Not selected yet")
-
             wa_link = f"https://wa.me/{from_number}"
-
             response = requests.post(
                 "https://api.resend.com/emails",
                 headers={
@@ -310,11 +223,16 @@ def send_email_notification(from_number, user_text, niche=None):
                     "from": "RapidNexTech Bot <onboarding@resend.dev>",
                     "to": [NOTIFY_EMAIL],
                     "subject": f"New Demo Lead — +{from_number}",
-                    "text": f"New prospect on your RapidNexTech WhatsApp demo.\n\nWhatsApp Number: +{from_number}\nReply on WhatsApp: {wa_link}\nNiche Selected: {niche_label}\nTheir Message: {user_text}\n\n---\nOpen WhatsApp and message them now while they are active."
+                    "text": (
+                        f"New prospect on your RapidNexTech WhatsApp demo (Lahore aesthetic).\n\n"
+                        f"WhatsApp Number: +{from_number}\n"
+                        f"Reply on WhatsApp: {wa_link}\n"
+                        f"Their Message: {user_text}\n\n"
+                        f"---\nOpen WhatsApp and message them now while they are active."
+                    )
                 }
             )
             print(f"Email sent: {response.status_code}")
-
         except Exception as e:
             print(f"Email notification failed: {e}")
 
@@ -325,10 +243,7 @@ def send_email_notification(from_number, user_text, niche=None):
 
 def send_text_message(to, message):
     url = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages"
-    headers = {
-        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
     payload = {
         "messaging_product": "whatsapp",
         "to": to,
@@ -342,16 +257,8 @@ def send_text_message(to, message):
 
 def send_button_message(to, body_text, buttons):
     url = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages"
-    headers = {
-        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    button_list = []
-    for btn in buttons:
-        button_list.append({
-            "type": "reply",
-            "reply": {"id": btn["id"], "title": btn["title"]}
-        })
+    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
+    button_list = [{"type": "reply", "reply": {"id": b["id"], "title": b["title"]}} for b in buttons]
     payload = {
         "messaging_product": "whatsapp",
         "to": to,
@@ -367,55 +274,38 @@ def send_button_message(to, body_text, buttons):
     return response.json()
 
 
-def send_niche_selector(to, in_arabic=False):
-    if in_arabic:
-        body = "👋 *تخيل مريض يرسل لعيادتك الساعة 11 بالليل...*\n\nهذا بالضبط كيف يتعامل ذكاء RapidNexTech الاصطناعي مع الاستفسارات — يؤهل المريض، يجاوب أسئلته، ويوجهه للحجز. تلقائياً.\n\n*وش نوع العيادة اللي تبي تجربها كمريض؟*"
-    else:
-        body = "👋 *Imagine a patient messaging your clinic at 11PM...*\n\nThis is exactly how RapidNexTech's AI handles that conversation — qualifying them, answering their questions, and moving them toward booking. Automatically.\n\n*Which clinic type would you like to experience as a patient?*"
-
-    send_button_message(
-        to,
-        body,
-        [
-            {"id": "niche_medspa", "title": "💆 Med Spa"},
-            {"id": "niche_aesthetic", "title": "✨ Aesthetic Clinic"},
-            {"id": "niche_dental", "title": "🦷 Dental Clinic"}
-        ]
-    )
+def send_welcome_sequence(to):
+    """First-touch: framing message, then the clinic's own first message + service buttons."""
+    send_text_message(to, WELCOME_FRAMING)
+    send_button_message(to, CLINIC_FIRST_MESSAGE, WELCOME_BUTTONS)
 
 
-def send_welcome_menu(to, niche, in_arabic=False):
-    buttons = WELCOME_BUTTONS.get(niche, WELCOME_BUTTONS["medspa"])
-    body = "وش تبي تعرف؟" if in_arabic else "What would you like to know?"
-    send_button_message(to, body, buttons)
-
-
-def send_booking_prompt(to, in_arabic=False):
-    if in_arabic:
-        body = "تبي تحجز موعد؟"
+def send_booking_prompt(to, roman=False):
+    if roman:
+        body = "Aap consultation book karna chahenge?"
         buttons = [
-            {"id": "action_book", "title": "📅 احجز الحين"},
-            {"id": "action_more", "title": "💬 عندي أسئلة"}
+            {"id": "action_book", "title": "📅 Book Now"},
+            {"id": "action_more", "title": "💬 Aur Sawal"}
         ]
     else:
         body = "Would you like to book a consultation?"
         buttons = [
             {"id": "action_book", "title": "📅 Book Now"},
-            {"id": "action_more", "title": "💬 Ask More Questions"}
+            {"id": "action_more", "title": "💬 Ask More"}
         ]
     send_button_message(to, body, buttons)
 
 
-def get_groq_response(user_message, niche, conversation_history):
+def get_groq_response(user_message, conversation_history):
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-    messages = [{"role": "system", "content": SYSTEM_PROMPTS[niche]}]
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     messages.extend(conversation_history)
     messages.append({"role": "user", "content": user_message})
     payload = {
         "model": "llama-3.3-70b-versatile",
         "messages": messages,
-        "max_tokens": 150,
+        "max_tokens": 200,
         "temperature": 0.7
     }
     response = requests.post(url, headers=headers, json=payload)
@@ -423,170 +313,146 @@ def get_groq_response(user_message, niche, conversation_history):
     return data["choices"][0]["message"]["content"]
 
 
+# ---------------------------------------------------------------------------
+# Lightweight Roman Urdu heuristic — ONLY used to pick the language of the
+# fixed follow-up / booking-prompt strings (NOT for the AI reply itself,
+# which mirrors language on its own via the system prompt).
+# ---------------------------------------------------------------------------
+ROMAN_URDU_MARKERS = {
+    "ap", "aap", "kya", "kia", "hai", "hain", "kitna", "kitnay", "kitne", "krna",
+    "karna", "chahiye", "chahye", "mujhe", "mujhay", "nahi", "nhi", "han", "haan",
+    "ji", "jee", "acha", "theek", "thik", "kab", "kaise", "kaise", "kaisay",
+    "available", "btao", "batao", "bata", "price", "rate", "krwana", "karwana",
+    "skin", "ka", "ki", "ke", "ko", "se", "mein", "main", "lia", "liye", "k"
+}
+
+
+def looks_roman_urdu(text):
+    if not text:
+        return False
+    words = [w.strip("?.!,").lower() for w in text.split()]
+    if not words:
+        return False
+    hits = sum(1 for w in words if w in ROMAN_URDU_MARKERS)
+    # require at least 2 markers, or 1 marker in a short message, to avoid
+    # false positives on plain English ("ok", "hi", single words).
+    return hits >= 2 or (hits >= 1 and len(words) <= 4)
+
+
 def handle_message(from_number, user_text, button_id=None):
     is_new_user = from_number not in conversation_store
 
     if is_new_user:
         conversation_store[from_number] = {
-            "niche": None,
             "history": [],
             "notified": False,
+            "welcomed": False,
             "last_user_message_time": datetime.now(timezone.utc).timestamp(),
             "last_followup_time": 0,
             "booking_sent": False,
-            "arabic_mode": False
+            "roman_urdu_mode": False,
         }
 
     session = conversation_store[from_number]
     session["last_user_message_time"] = datetime.now(timezone.utc).timestamp()
 
-    # Detect Arabic from user text and update session
-    if user_text and is_arabic(user_text):
-        session["arabic_mode"] = True
+    # Update Roman-Urdu flag from the latest user text (sticky once set, but
+    # re-checked each message so a switch back to English is also honored).
+    if user_text:
+        session["roman_urdu_mode"] = looks_roman_urdu(user_text)
+    roman = session.get("roman_urdu_mode", False)
 
-    in_arabic = session.get("arabic_mode", False)
-
-    # Email on first message
+    # Email notification on first contact
     if is_new_user and not session["notified"]:
-        send_email_notification(from_number, user_text or "Started demo", niche=None)
+        send_email_notification(from_number, user_text or "Started demo")
         session["notified"] = True
+
+    # First touch (no niche selector anymore — straight into the clinic)
+    if not session["welcomed"]:
+        session["welcomed"] = True
+        send_welcome_sequence(from_number)
+        schedule_followup_after_bot_message(from_number)
+        # If they also typed a real question in their very first message,
+        # let it fall through to the AI below instead of returning early.
+        if not user_text or button_id:
+            return
 
     # Handle button presses
     if button_id:
-
-        if button_id == "niche_medspa":
-            session["niche"] = "medspa"
-            if in_arabic:
-                send_text_message(from_number, "الحين تجرب تجربة *Glow Aesthetic Clinic دبي* 💆\n\nهلا! أنا نور. بماذا أقدر أساعدك اليوم؟")
-            else:
-                send_text_message(from_number, "You are now experiencing *Glow Aesthetic Clinic Dubai* 💆\n\nHi! I'm Nour. What brings you in today?")
-            send_welcome_menu(from_number, "medspa", in_arabic)
+        if button_id == "menu_treatments":
+            send_text_message(from_number, TREATMENTS_TEXT)
             schedule_followup_after_bot_message(from_number)
             return
-
-        elif button_id == "niche_aesthetic":
-            session["niche"] = "aesthetic"
-            if in_arabic:
-                send_text_message(from_number, "الحين تجرب تجربة *Elite Skin & Laser Centre الدوحة* ✨\n\nهلا! أنا ليلى. كيف أقدر أساعدك؟")
-            else:
-                send_text_message(from_number, "You are now experiencing *Elite Skin & Laser Centre Doha* ✨\n\nHi! I'm Layla. How can I help you today?")
-            send_welcome_menu(from_number, "aesthetic", in_arabic)
-            schedule_followup_after_bot_message(from_number)
-            return
-
-        elif button_id == "niche_dental":
-            session["niche"] = "dental"
-            if in_arabic:
-                send_text_message(from_number, "الحين تجرب تجربة *Pearl Dental Clinic أبوظبي* 🦷\n\nهلا! أنا سارة. بماذا أقدر أساعدك؟")
-            else:
-                send_text_message(from_number, "You are now experiencing *Pearl Dental Clinic Abu Dhabi* 🦷\n\nHi! I'm Sara. What can I help you with today?")
-            send_welcome_menu(from_number, "dental", in_arabic)
-            schedule_followup_after_bot_message(from_number)
-            return
-
-        elif button_id == "menu_treatments":
-            niche = session.get("niche", "medspa")
-            text = TREATMENTS_TEXT.get(niche, "We offer a wide range of treatments. Which area are you interested in?")
-            send_text_message(from_number, text)
-            schedule_followup_after_bot_message(from_number)
-            return
-
         elif button_id == "menu_pricing":
-            niche = session.get("niche", "medspa")
-            text = PRICING_TEXT.get(niche, "Our pricing varies by treatment. Would you like to book a consultation for an exact quote?")
-            send_text_message(from_number, text)
+            send_text_message(from_number, PRICING_TEXT)
             schedule_followup_after_bot_message(from_number)
             return
-
         elif button_id == "menu_book":
-            niche = session.get("niche", "medspa")
-            booking_links = {
-                "medspa": "https://rapidnextech.com/book/medspa",
-                "aesthetic": "https://rapidnextech.com/book/aesthetic",
-                "dental": "https://rapidnextech.com/book/dental"
-            }
-            link = booking_links.get(niche, "https://rapidnextech.com/contact")
-            if in_arabic:
-                send_text_message(from_number, f"تفضل رابط الحجز: {link}\n\nفريقنا راح يأكد موعدك خلال ساعات. في شي ثاني أقدر أساعدك فيه؟")
+            if roman:
+                msg = "Bilkul! Main aap k liye consultation slot confirm karwa deti hoon. Aap apna naam bata dein, hamari team timings abhi bhej degi 😊"
             else:
-                send_text_message(from_number, f"Here's your booking link: {link}\n\nOur team will confirm your appointment within a few hours. Is there anything else I can help you with?")
+                msg = "Wonderful! I'll have our team confirm a consultation slot for you. May I take your name, and our team will message you the available timings shortly 😊"
+            send_text_message(from_number, msg)
             session["booking_sent"] = True
             schedule_followup_after_bot_message(from_number)
             return
-
         elif button_id == "action_book":
-            niche = session.get("niche", "medspa")
-            booking_links = {
-                "medspa": "https://rapidnextech.com/book/medspa",
-                "aesthetic": "https://rapidnextech.com/book/aesthetic",
-                "dental": "https://rapidnextech.com/book/dental"
-            }
-            link = booking_links.get(niche, "https://rapidnextech.com/contact")
-            if in_arabic:
-                send_text_message(from_number, f"تفضل رابط الحجز: {link}\n\nفريقنا راح يأكد موعدك خلال ساعات. في شي ثاني أقدر أساعدك فيه؟")
+            if roman:
+                msg = "Bohat khoob! Main aap k liye slot confirm karwa deti hoon — aap apna naam bata dein 😊"
             else:
-                send_text_message(from_number, f"Here's your booking link: {link}\n\nOur team will confirm your appointment within a few hours. Is there anything else I can help you with?")
+                msg = "Perfect! I'll have our team confirm a slot for you — may I take your name? 😊"
+            send_text_message(from_number, msg)
             session["booking_sent"] = True
             schedule_followup_after_bot_message(from_number)
             return
-
         elif button_id == "action_more":
-            if in_arabic:
-                send_text_message(from_number, "بالتأكيد! وش تبي تعرف؟ أنا هنا أجاوب أي سؤال عن العلاجات أو الأسعار.")
+            if roman:
+                msg = "Bilkul! Aap kya jaanna chahenge? Treatments ya pricing — main yahin hoon 😊"
             else:
-                send_text_message(from_number, "Of course! What would you like to know? Happy to answer anything about treatments, pricing, or procedures.")
+                msg = "Of course! What would you like to know — treatments or pricing? I'm right here 😊"
+            send_text_message(from_number, msg)
             schedule_followup_after_bot_message(from_number)
             return
 
-    # No niche selected yet
-    if session["niche"] is None:
-        send_niche_selector(from_number, in_arabic)
-        schedule_followup_after_bot_message(from_number)
+    # No text to process (e.g. only the welcome was just sent)
+    if not user_text:
         return
 
-    # Email when they start actual conversation
-    if len(session["history"]) == 0 and session["niche"]:
-        send_email_notification(from_number, user_text, niche=session["niche"])
-
-    # Get AI response
-    ai_response = get_groq_response(user_text, session["niche"], session["history"])
+    # AI response (language mirroring handled inside the system prompt)
+    ai_response = get_groq_response(user_text, session["history"])
 
     session["history"].append({"role": "user", "content": user_text})
     session["history"].append({"role": "assistant", "content": ai_response})
-
     if len(session["history"]) > 10:
         session["history"] = session["history"][-10:]
 
     send_text_message(from_number, ai_response)
 
-    # Track if booking link was sent by AI
-    if any(keyword in ai_response.lower() for keyword in [
-        "rapidnextech.com/book", "booking link", "confirm your slot",
-        "confirm your appointment", "رابط الحجز"
+    # Track booking intent from AI's own wording
+    if any(kw in ai_response.lower() for kw in [
+        "confirm a slot", "confirm your slot", "take your name", "team will message",
+        "slot confirm", "naam bata", "timings"
     ]):
         session["booking_sent"] = True
 
-    # Schedule follow-up after EVERY bot message
     schedule_followup_after_bot_message(from_number)
 
-    # Show booking button on intent
+    # Offer booking buttons on detected intent
     booking_already_sent = session.get("booking_sent", False)
-
-    ai_signals = any(keyword in ai_response.lower() for keyword in [
-        "booking link", "book a consultation", "schedule a consultation",
-        "send you the link", "ready to book", "book now", "رابط الحجز", "احجز"
+    ai_signals = any(kw in ai_response.lower() for kw in [
+        "book a consultation", "consultation would", "next step", "confirm a slot",
+        "shall i", "slot confirm", "consultation"
     ])
-
-    booking_intent_signals = [
-        "book", "appointment", "schedule", "consultation", "reserve",
-        "available", "availability", "when can", "how do i", "sign up",
-        "interested", "ready", "yes", "sure", "okay", "let's do", "i want",
-        "حجز", "موعد", "أبي أحجز", "كيف أحجز", "أبي", "نعم", "زين", "هلا"
+    intent_words = [
+        "book", "appointment", "schedule", "consultation", "available", "availability",
+        "interested", "ready", "yes", "sure", "okay", "ok", "i want", "price", "rate",
+        "kitna", "kitne", "book karna", "appointment", "available", "chahiye", "han", "haan",
+        "ji", "krwana", "karwana", "naam"
     ]
-    patient_showing_intent = any(signal in user_text.lower() for signal in booking_intent_signals)
+    patient_intent = any(w in user_text.lower() for w in intent_words)
 
-    if (patient_showing_intent or ai_signals) and not booking_already_sent:
-        send_booking_prompt(from_number, in_arabic)
+    if (patient_intent or ai_signals) and not booking_already_sent:
+        send_booking_prompt(from_number, roman)
 
 
 @app.route("/webhook", methods=["GET"])
@@ -604,7 +470,6 @@ def verify_webhook():
 def receive_message():
     data = request.get_json()
     print(f"Incoming: {json.dumps(data)}")
-
     try:
         entry = data["entry"][0]
         changes = entry["changes"][0]
@@ -616,7 +481,6 @@ def receive_message():
         message = value["messages"][0]
         from_number = message["from"]
         msg_type = message["type"]
-
         print(f"Message from: {from_number}, type: {msg_type}")
 
         if msg_type == "interactive":
@@ -645,7 +509,7 @@ def receive_message():
 
 @app.route("/", methods=["GET"])
 def home():
-    return "RapidNexTech WhatsApp Bot is running 🚀", 200
+    return "RapidNexTech WhatsApp Bot (Lahore Aesthetic) is running 🚀", 200
 
 
 if __name__ == "__main__":
