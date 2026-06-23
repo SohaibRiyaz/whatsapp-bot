@@ -62,6 +62,8 @@ IMPORTANT: Never introduce yourself or greet the patient again. They have alread
 
 CONVERSATION RULES:
 - Never just answer and stop. Always end with ONE relevant follow-up question.
+- CRITICAL — your follow-up question must be something the PATIENT can actually answer. NEVER ask the patient clinical questions that only a doctor could answer, such as "how many sessions will you need?", "what dosage is right for you?", or "which treatment is best for your skin?". Those are decisions the doctor makes during consultation. Instead, ask things the patient knows: their concern, the area they want treated, whether it's their first time, or whether they'd like to book a consultation.
+- When a patient asks something clinical (e.g. "how many sessions?", "which is best for me?", "what will it cost for my case?"), the correct answer is: it depends on their skin and is decided by the doctor at a consultation — then offer to book one. Do NOT turn that question back onto the patient.
 - Ask ONE qualifying question before giving full pricing. Example: "Which area were you considering?" or "Is this your first time getting this treatment?"
 - Detect intent: price questions = high intent, treat seriously. General questions = educate briefly, then qualify.
 - If the patient hesitates, build trust: mention experienced doctors, safe FDA-approved products, natural results, personalized plans.
@@ -281,18 +283,13 @@ def send_welcome_sequence(to):
 
 
 def send_booking_prompt(to, roman=False):
-    if roman:
-        body = "Aap consultation book karna chahenge?"
-        buttons = [
-            {"id": "action_book", "title": "📅 Book Now"},
-            {"id": "action_more", "title": "💬 Aur Sawal"}
-        ]
-    else:
-        body = "Would you like to book a consultation?"
-        buttons = [
-            {"id": "action_book", "title": "📅 Book Now"},
-            {"id": "action_more", "title": "💬 Ask More"}
-        ]
+    # Body text mirrors language (it's conversation), but BUTTONS are always
+    # English — buttons are fixed tap-targets and must look consistent/professional.
+    body = "Aap consultation book karna chahenge?" if roman else "Would you like to book a consultation?"
+    buttons = [
+        {"id": "action_book", "title": "📅 Book Now"},
+        {"id": "action_more", "title": "💬 Ask a Question"}
+    ]
     send_button_message(to, body, buttons)
 
 
@@ -308,9 +305,19 @@ def get_groq_response(user_message, conversation_history):
         "max_tokens": 200,
         "temperature": 0.7
     }
-    response = requests.post(url, headers=headers, json=payload)
-    data = response.json()
-    return data["choices"][0]["message"]["content"]
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=20)
+        data = response.json()
+        content = data["choices"][0]["message"]["content"].strip()
+        if not content:
+            raise ValueError("Empty content from Groq")
+        return content
+    except Exception as e:
+        print(f"Groq error: {e}")
+        # Graceful, on-brand fallback so the demo never goes silent.
+        if looks_roman_urdu(user_message):
+            return "Maazrat, thoda technical issue aa gaya 😅 Aap dobara bata dein, main yahin hoon — ya 'Book Consultation' dabaa dein."
+        return "Sorry, I had a brief hiccup 😅 Could you say that again? I'm right here — or tap 'Book Consultation' and our team will reach out."
 
 
 # ---------------------------------------------------------------------------
@@ -367,15 +374,15 @@ def handle_message(from_number, user_text, button_id=None):
         send_email_notification(from_number, user_text or "Started demo")
         session["notified"] = True
 
-    # First touch (no niche selector anymore — straight into the clinic)
+    # First touch (no niche selector anymore — straight into the clinic).
+    # ALWAYS stop after the welcome on the very first message. The patient's
+    # NEXT message is where the AI conversation begins. This prevents a third
+    # message (the AI answering "hello") from firing on the welcome turn.
     if not session["welcomed"]:
         session["welcomed"] = True
         send_welcome_sequence(from_number)
         schedule_followup_after_bot_message(from_number)
-        # If they also typed a real question in their very first message,
-        # let it fall through to the AI below instead of returning early.
-        if not user_text or button_id:
-            return
+        return
 
     # Handle button presses
     if button_id:
@@ -437,21 +444,26 @@ def handle_message(from_number, user_text, button_id=None):
 
     schedule_followup_after_bot_message(from_number)
 
-    # Offer booking buttons on detected intent
+    # Offer booking buttons ONLY on genuine high-intent — not on every mention
+    # of "consultation" (the AI says that constantly, which would spam buttons).
     booking_already_sent = session.get("booking_sent", False)
-    ai_signals = any(kw in ai_response.lower() for kw in [
-        "book a consultation", "consultation would", "next step", "confirm a slot",
-        "shall i", "slot confirm", "consultation"
-    ])
-    intent_words = [
-        "book", "appointment", "schedule", "consultation", "available", "availability",
-        "interested", "ready", "yes", "sure", "okay", "ok", "i want", "price", "rate",
-        "kitna", "kitne", "book karna", "appointment", "available", "chahiye", "han", "haan",
-        "ji", "krwana", "karwana", "naam"
-    ]
-    patient_intent = any(w in user_text.lower() for w in intent_words)
 
-    if (patient_intent or ai_signals) and not booking_already_sent:
+    # Strong intent phrases in the PATIENT's message (not the AI's reply).
+    strong_intent_phrases = [
+        "book", "appointment", "schedule", "i want to", "i'd like to",
+        "ready to", "sign me up", "let's do", "lets do",
+        "book karna", "appointment chahiye", "slot", "kab a", "kab aaun",
+        "naam", "confirm kar", "ho jaye ga", "ho jayega",
+    ]
+    patient_strong_intent = any(p in user_text.lower() for p in strong_intent_phrases)
+
+    # The AI explicitly moving toward booking (its own wording).
+    ai_moving_to_book = any(kw in ai_response.lower() for kw in [
+        "confirm a slot", "shall i have our team", "take your name",
+        "slot confirm", "naam bata", "best next step",
+    ])
+
+    if (patient_strong_intent or ai_moving_to_book) and not booking_already_sent:
         send_booking_prompt(from_number, roman)
 
 
