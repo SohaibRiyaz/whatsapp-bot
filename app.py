@@ -121,6 +121,22 @@ CLINIC_FIRST_MESSAGE = (
     f"I'm {COORDINATOR_NAME}. How can I help you today?"
 )
 
+# Shown ONCE, right after a booking completes — breaks the demo "fourth wall"
+# and pitches the real product to the prospect (a clinic owner) who just saw it work.
+# NOTE: replace the [VIDEO LINK] placeholder with your real Loom/YouTube unlisted URL.
+DEMO_REVEAL_MESSAGE = (
+    "— — — — —\n\n"
+    "👀 *That was a live demo.*\n\n"
+    "Thanks for your interest! Sohaib here, founder of *RapidNexTech*.\n\n"
+    "What you just experienced is exactly how this would handle *your* clinic's "
+    "WhatsApp inquiries — replying instantly, qualifying patients, and booking them, 24/7.\n\n"
+    "Here's what happens next:\n"
+    "1️⃣ I'll personally message you within 24 hours to understand your clinic's setup.\n"
+    "2️⃣ We'll do a quick 15-minute call where I show you exactly how this works on *your* WhatsApp number.\n"
+    "3️⃣ If it's a fit, I'll have you live within 2 days.\n\n"
+    "Just reply *DEMO* and I'll take it from there. 🚀"
+)
+
 WELCOME_BUTTONS = [
     {"id": "menu_treatments", "title": "✨ Our Treatments"},
     {"id": "menu_pricing", "title": "💰 See Pricing"},
@@ -355,6 +371,27 @@ def looks_roman_urdu(text):
 
 import re
 
+def message_has_booking_ask(text):
+    """True if a bot message ends with / contains an offer to book or confirm a
+    consultation. Used to set pending_book_ask consistently — whether the message
+    came from the AI or from a fixed string (pricing/treatments)."""
+    if not text:
+        return False
+    low = text.lower()
+    return (
+        any(kw in low for kw in [
+            "shall i have our team", "shall i book", "book a slot", "confirm a slot",
+            "may i have your name", "may i take your name", "slot confirm", "naam bata",
+            "slot book kar", "consultation book kar", "set up a quick consultation",
+            "set up a consultation", "would you like to book", "would you like me to book",
+            "book a consultation", "book your consultation", "consultation set up",
+        ])
+        or ("book" in low and ("consultation" in low or "appointment" in low or "slot" in low))
+        or ("would you like" in low and ("consultation" in low or "appointment" in low))
+        or ("consultation" in low and ("set up" in low or "arrange" in low or "shall i" in low))
+    )
+
+
 def extract_phone(text):
     """Return a cleaned phone number if the text looks like one, else None."""
     if not text:
@@ -474,6 +511,11 @@ def handle_booking_step(from_number, session, user_text, roman):
         send_text_message(from_number, msg)
         # Email the captured lead details
         send_booking_lead_email(from_number, session)
+        # Break the fourth wall ONCE — pitch the real product now that they've
+        # seen a booking complete end-to-end (the strongest moment to reveal).
+        if not session.get("reveal_sent"):
+            session["reveal_sent"] = True
+            send_text_message(from_number, DEMO_REVEAL_MESSAGE)
         return True
 
     return False
@@ -502,6 +544,63 @@ def send_booking_lead_email(from_number, session):
         except Exception as e:
             print(f"Booking lead email failed: {e}")
     t = threading.Thread(target=_send); t.daemon = True; t.start()
+
+
+def send_hot_lead_email(from_number, user_text):
+    """Fired when a prospect replies DEMO after the reveal — a real clinic-owner lead."""
+    def _send():
+        try:
+            if not RESEND_API_KEY or not NOTIFY_EMAIL:
+                return
+            requests.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
+                json={
+                    "from": "RapidNexTech Bot <onboarding@resend.dev>",
+                    "to": [NOTIFY_EMAIL],
+                    "subject": f"🔥 HOT LEAD — clinic owner replied after demo (+{from_number})",
+                    "text": (
+                        f"A prospect completed the demo booking AND replied to the founder reveal.\n"
+                        f"This is very likely a real clinic owner.\n\n"
+                        f"WhatsApp: +{from_number} (https://wa.me/{from_number})\n"
+                        f"Their message: {user_text}\n\n"
+                        f"---\nMessage them personally now while they're warm."
+                    )
+                }
+            )
+        except Exception as e:
+            print(f"Hot lead email failed: {e}")
+    t = threading.Thread(target=_send); t.daemon = True; t.start()
+
+
+GREETING_PREFIXES = [
+    "assalam o alaikum", "assalam-o-alaikum", "assalamualaikum", "asalam o alaikum",
+    "salam", "hello", "hi there", "hi!", "hi,", "hey", "welcome to", "welcome back",
+]
+
+def strip_repeat_greeting(ai_text, session):
+    """The system prompt forbids re-greeting, but the model occasionally does it
+    anyway (e.g. answering 'ok' with 'Assalam o Alaikum! I'm Hina...'). If we've
+    already greeted once, strip a leading greeting clause from the AI reply."""
+    if not ai_text:
+        return ai_text
+    # Count prior assistant turns; the welcome already greeted, so any greeting
+    # in a later AI turn is a repeat.
+    low = ai_text.lstrip().lower()
+    for g in GREETING_PREFIXES:
+        if low.startswith(g):
+            # Drop the first sentence/clause up to the first sentence end.
+            rest = ai_text.lstrip()
+            # find end of the greeting sentence
+            for sep in [". ", "! ", "? ", "\n"]:
+                idx = rest.find(sep)
+                if 0 <= idx <= 60:  # only strip a short leading greeting clause
+                    cleaned = rest[idx + len(sep):].strip()
+                    # also strip a trailing self-intro like "I'm Hina from ..."
+                    return cleaned if cleaned else ai_text
+            break
+    # Also remove a mid-text "I'm Hina from Lumière..." re-introduction if present
+    return ai_text
 
 
 def is_pure_ack(text):
@@ -547,6 +646,7 @@ def handle_message(from_number, user_text, button_id=None):
             "booking_name": None,
             "booking_phone": None,
             "pending_book_ask": False,
+            "reveal_sent": False,
         }
 
     session = conversation_store[from_number]
@@ -581,6 +681,9 @@ def handle_message(from_number, user_text, button_id=None):
             return
         elif button_id == "menu_pricing":
             send_text_message(from_number, PRICING_TEXT)
+            # PRICING_TEXT ends with a booking-ask, so a following "ok"/"yes"
+            # should enter booking — flag it.
+            session["pending_book_ask"] = message_has_booking_ask(PRICING_TEXT)
             schedule_followup_after_bot_message(from_number)
             return
         elif button_id == "menu_book":
@@ -609,6 +712,18 @@ def handle_message(from_number, user_text, button_id=None):
         handle_booking_step(from_number, session, user_text, roman)
         return
     if stage == "done":
+        # If they reply DEMO after the reveal, this is a HOT inbound lead —
+        # acknowledge as the founder and alert by email.
+        if session.get("reveal_sent") and "demo" in user_text.lower():
+            send_text_message(
+                from_number,
+                "🙌 Perfect — thanks for reaching out! This is Sohaib. "
+                "I'll personally message you shortly to set up a quick call. "
+                "Mind sharing your *clinic's name* so I can prep before we talk?"
+            )
+            send_hot_lead_email(from_number, user_text)
+            session["booking_stage"] = "hot_lead"
+            return
         # Booking is complete. Stay SILENT on pure acknowledgments ("ok",
         # "thanks", "thk hai") — a real coordinator wouldn't keep replying.
         if is_pure_ack(user_text):
@@ -620,6 +735,19 @@ def handle_message(from_number, user_text, button_id=None):
         if len(session["history"]) > 10:
             session["history"] = session["history"][-10:]
         send_text_message(from_number, ai_response)
+        return
+
+    if stage == "hot_lead":
+        # They've identified as a clinic owner. Capture whatever they say
+        # (likely their clinic name) and hand off — don't loop them.
+        if not session.get("hot_lead_detail_sent"):
+            session["hot_lead_detail_sent"] = True
+            send_text_message(
+                from_number,
+                "Got it — thank you! 🙏 I'll be in touch very soon to show you "
+                "exactly how this works on your own WhatsApp number. Talk soon! — Sohaib"
+            )
+            send_hot_lead_email(from_number, "Clinic detail: " + user_text)
         return
 
     # If the PREVIOUS bot turn asked to book a slot, and the patient is now
@@ -652,6 +780,9 @@ def handle_message(from_number, user_text, button_id=None):
 
     # AI response (language mirroring handled inside the system prompt)
     ai_response = get_groq_response(user_text, session["history"])
+    # Safety net: the AI sometimes re-greets despite the prompt rule. Strip a
+    # leading greeting if this isn't the very first AI turn.
+    ai_response = strip_repeat_greeting(ai_response, session)
 
     session["history"].append({"role": "user", "content": user_text})
     session["history"].append({"role": "assistant", "content": ai_response})
@@ -663,18 +794,9 @@ def handle_message(from_number, user_text, button_id=None):
     schedule_followup_after_bot_message(from_number)
 
     # If the AI's reply asked to book/confirm a slot, remember it so the NEXT
-    # patient message ("yes") enters the structured booking flow.
-    al = ai_response.lower()
-    ai_asked_to_book = (
-        any(kw in al for kw in [
-            "shall i have our team", "shall i book", "book a slot", "confirm a slot",
-            "may i have your name", "may i take your name", "slot confirm", "naam bata",
-            "slot book kar", "consultation book kar",
-        ])
-        # natural phrasings: "would you like to book a consultation / appointment"
-        or ("book" in al and ("consultation" in al or "appointment" in al or "slot" in al))
-        or ("would you like" in al and ("consultation" in al or "appointment" in al))
-    )
+    # patient message ("yes"/"ok") enters the structured booking flow. Uses the
+    # SAME centralized detector as the fixed pricing/treatment strings.
+    ai_asked_to_book = message_has_booking_ask(ai_response)
     session["pending_book_ask"] = ai_asked_to_book
 
     # Offer booking buttons ONLY on genuine high-intent in the PATIENT's own
