@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from flask import Flask, request, jsonify
 from apscheduler.schedulers.background import BackgroundScheduler
 
+import supabase_store as sb
+
 app = Flask(__name__)
 
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "WhatsApp_DEMo_ToKen_786")
@@ -134,6 +136,8 @@ DEMO_REVEAL_MESSAGE = (
     "1️⃣ I'll personally message you within 24 hours to understand your clinic's setup.\n"
     "2️⃣ We'll do a quick 15-minute call where I show you exactly how this works on *your* WhatsApp number.\n"
     "3️⃣ If it's a fit, I'll have you live within 2 days.\n\n"
+    "In the meantime, here's a 60-second recording of the bot handling a real patient inquiry:\n"
+    "[VIDEO LINK]\n\n"
     "Just reply *DEMO* and I'll take it from there. 🚀"
 )
 
@@ -266,8 +270,18 @@ def send_email_notification(from_number, user_text):
     thread.start()
 
 
+def _resolve_send_context(to):
+    """For a recipient number, return (phone_number_id, clinic_id, conversation_id)
+    from their session — so we send from the RIGHT clinic number and log correctly.
+    Falls back to the global PHONE_NUMBER_ID for the single-number demo."""
+    session = conversation_store.get(to, {})
+    pnid = session.get("phone_number_id") or PHONE_NUMBER_ID
+    return pnid, session.get("clinic_id"), session.get("conversation_id")
+
+
 def send_text_message(to, message):
-    url = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages"
+    pnid, clinic_id, conversation_id = _resolve_send_context(to)
+    url = f"https://graph.facebook.com/v19.0/{pnid}/messages"
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
     payload = {
         "messaging_product": "whatsapp",
@@ -277,11 +291,15 @@ def send_text_message(to, message):
     }
     response = requests.post(url, headers=headers, json=payload)
     print(f"Send text response: {response.status_code} - {response.text}")
+    # Log the bot's outbound message so the dashboard shows the full thread.
+    if conversation_id:
+        sb.log_message(clinic_id, conversation_id, "outbound", "bot", message)
     return response.json()
 
 
 def send_button_message(to, body_text, buttons):
-    url = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages"
+    pnid, clinic_id, conversation_id = _resolve_send_context(to)
+    url = f"https://graph.facebook.com/v19.0/{pnid}/messages"
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
     button_list = [{"type": "reply", "reply": {"id": b["id"], "title": b["title"]}} for b in buttons]
     payload = {
@@ -296,6 +314,11 @@ def send_button_message(to, body_text, buttons):
     }
     response = requests.post(url, headers=headers, json=payload)
     print(f"Send button response: {response.status_code} - {response.text}")
+    # Log the body text (with the button options appended for dashboard clarity).
+    if conversation_id:
+        btn_labels = " | ".join(b["title"] for b in buttons)
+        sb.log_message(clinic_id, conversation_id, "outbound", "bot",
+                       f"{body_text}\n[buttons: {btn_labels}]")
     return response.json()
 
 
@@ -494,6 +517,14 @@ def handle_booking_step(from_number, session, user_text, roman):
             return True
         session["booking_phone"] = phone
         session["booking_stage"] = "done"
+        # Sync the captured name + booking stage to Supabase so the dashboard
+        # shows this conversation as a completed booking with the patient's name.
+        if session.get("conversation_id"):
+            sb.update_conversation(
+                session["conversation_id"],
+                patient_name=session.get("booking_name"),
+                booking_stage="done",
+            )
         first = (session.get("booking_name") or "").split()[0] if session.get("booking_name") else ""
         # Single clean confirmation + close. No more questions, no loop.
         if roman:
@@ -629,7 +660,7 @@ def is_pure_ack(text):
     return False
 
 
-def handle_message(from_number, user_text, button_id=None):
+def handle_message(from_number, user_text, button_id=None, phone_number_id=None):
     is_new_user = from_number not in conversation_store
 
     if is_new_user:
@@ -647,10 +678,42 @@ def handle_message(from_number, user_text, button_id=None):
             "booking_phone": None,
             "pending_book_ask": False,
             "reveal_sent": False,
+            # Supabase / multi-tenant context
+            "phone_number_id": phone_number_id,
+            "clinic_id": None,
+            "conversation_id": None,
         }
 
     session = conversation_store[from_number]
     session["last_user_message_time"] = datetime.now(timezone.utc).timestamp()
+    if phone_number_id and not session.get("phone_number_id"):
+        session["phone_number_id"] = phone_number_id
+
+    # ----- Supabase: resolve clinic + conversation, log inbound, check takeover -----
+    # Defensive: if Supabase isn't configured, all of this no-ops and the bot
+    # behaves exactly as before (demo never breaks).
+    if session.get("clinic_id") is None and session.get("phone_number_id"):
+        clinic = sb.get_clinic_by_phone_number_id(session["phone_number_id"])
+        if clinic:
+            session["clinic_id"] = clinic.get("id")
+    if session.get("clinic_id") and session.get("conversation_id") is None:
+        convo = sb.get_or_create_conversation(session["clinic_id"], from_number)
+        if convo:
+            session["conversation_id"] = convo.get("id")
+
+    # Log the patient's inbound message (text only; button taps are UI events)
+    if user_text and session.get("conversation_id"):
+        sb.log_message(session["clinic_id"], session["conversation_id"],
+                       "inbound", "patient", user_text)
+
+    # HUMAN TAKEOVER: if clinic staff have taken over this conversation in the
+    # dashboard (status='human'), the bot must STAY SILENT. We've already logged
+    # the inbound message so staff see it in the dashboard — we just don't reply.
+    if session.get("clinic_id") and sb.conversation_is_human_controlled(
+        session["clinic_id"], from_number
+    ):
+        print(f"[takeover] {from_number} is human-controlled — bot staying silent.")
+        return
 
     # Update Roman-Urdu flag from the latest user text (sticky once set, but
     # re-checked each message so a switch back to English is also honored).
@@ -835,23 +898,26 @@ def receive_message():
         if "messages" not in value:
             return jsonify({"status": "ok"}), 200
 
+        # Multi-tenant: which of OUR numbers did this message arrive on?
+        phone_number_id = value.get("metadata", {}).get("phone_number_id")
+
         message = value["messages"][0]
         from_number = message["from"]
         msg_type = message["type"]
-        print(f"Message from: {from_number}, type: {msg_type}")
+        print(f"Message from: {from_number}, type: {msg_type}, phone_number_id: {phone_number_id}")
 
         if msg_type == "interactive":
             interactive = message.get("interactive", {})
             if interactive.get("type") == "button_reply":
                 button_id = interactive["button_reply"]["id"]
                 print(f"Button pressed: {button_id}")
-                handle_message(from_number, "", button_id=button_id)
+                handle_message(from_number, "", button_id=button_id, phone_number_id=phone_number_id)
                 return jsonify({"status": "ok"}), 200
 
         if msg_type == "text":
             user_text = message["text"]["body"].strip()
             print(f"User text: {user_text}")
-            handle_message(from_number, user_text)
+            handle_message(from_number, user_text, phone_number_id=phone_number_id)
             return jsonify({"status": "ok"}), 200
 
         send_text_message(from_number, "Please send a text message so I can assist you! 😊")
