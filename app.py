@@ -318,29 +318,94 @@ def send_booking_prompt(to, roman=False):
 
 def get_groq_response(user_message, conversation_history):
     url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    messages = [
+        {
+            "role": "system",
+            "content": SYSTEM_PROMPT
+        }
+    ]
+
     messages.extend(conversation_history)
-    messages.append({"role": "user", "content": user_message})
+
+    messages.append({
+        "role": "user",
+        "content": user_message
+    })
+
     payload = {
         "model": "openai/gpt-oss-120b",
         "messages": messages,
-        "max_tokens": 200,
-        "temperature": 0.7
+        "max_completion_tokens": 500,
+        "temperature": 0.6,
+        "reasoning_effort": "low",
+        "include_reasoning": False
     }
+
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=20)
+        response = requests.post(
+            url,
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
+
+        print(f"Groq HTTP status: {response.status_code}")
+        print(f"Groq raw response: {response.text}")
+
+        response.raise_for_status()
+
         data = response.json()
-        content = data["choices"][0]["message"]["content"].strip()
+
+        choices = data.get("choices", [])
+
+        if not choices:
+            raise ValueError(
+                f"Groq returned no choices. Response: {data}"
+            )
+
+        message = choices[0].get("message", {})
+        content = message.get("content")
+
+        if content is None:
+            raise ValueError(
+                f"Groq returned no content. Message: {message}"
+            )
+
+        content = content.strip()
+
         if not content:
-            raise ValueError("Empty content from Groq")
+            raise ValueError(
+                f"Groq returned empty content. Full response: {data}"
+            )
+
         return content
+
+    except requests.exceptions.Timeout:
+        print("Groq error: request timed out")
+
+    except requests.exceptions.RequestException as e:
+        print(f"Groq HTTP error: {e}")
+
     except Exception as e:
-        print(f"Groq error: {e}")
-        # Graceful, on-brand fallback so the demo never goes silent.
-        if looks_roman_urdu(user_message):
-            return "Maazrat, thoda technical issue aa gaya 😅 Aap dobara bata dein, main yahin hoon — ya 'Book Consultation' dabaa dein."
-        return "Sorry, I had a brief hiccup 😅 Could you say that again? I'm right here — or tap 'Book Consultation' and our team will reach out."
+        print(f"Groq processing error: {e}")
+
+    # Graceful fallback
+    if looks_roman_urdu(user_message):
+        return (
+            "Maazrat, thoda technical issue aa gaya 😅 "
+            "Aap dobara bata dein, main yahin hoon."
+        )
+
+    return (
+        "Sorry, I had a brief hiccup 😅 "
+        "Could you say that again? I'm right here."
+    )
 
 
 # ---------------------------------------------------------------------------
