@@ -323,7 +323,7 @@ def get_groq_response(user_message, conversation_history):
     messages.extend(conversation_history)
     messages.append({"role": "user", "content": user_message})
     payload = {
-        "model": "llama-3.3-70b-versatile",
+        "model": "openai/gpt-oss-120b",
         "messages": messages,
         "max_tokens": 200,
         "temperature": 0.7
