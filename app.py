@@ -611,6 +611,54 @@ def is_confirming(text):
     return bool(tokens & CONFIRM_WORDS) or any(p in low for p in CONFIRM_PHRASES)
 
 
+
+NOT_A_NAME_WORDS = {
+    "no", "nope", "nah", "yes", "yeah", "yep", "ok", "okay", "sure", "hi", "hello", "hey", "thanks",
+    "thank", "question", "questions", "what", "why", "how", "when", "where", "which", "who", "price",
+    "prices", "cost", "botox", "filler", "fillers", "laser", "later", "cancel", "stop", "wait", "nothing",
+    "none", "n/a", "na", "idk", "dont", "don't", "not", "want", "need", "book", "booking", "appointment",
+    "لا", "نعم", "ايوه", "اي", "تمام", "اوكي", "مرحبا", "شكرا", "شكراً", "سؤال", "كم", "ليش", "وش", "ايش",
+    "بعدين", "الغاء", "إلغاء", "ما", "مو", "موعد", "حجز",
+}
+
+CANCEL_MARKERS_EN = ["cancel", "not now", "later", "never mind", "nevermind", "don't want", "dont want", "no thanks", "stop"]
+CANCEL_MARKERS_AR = ["الغاء", "إلغاء", "بعدين", "مو الحين", "ما ابي", "ما أبي", "ما ابغى", "ما أبغى", "لا شكرا", "لا شكراً"]
+
+
+def wants_to_cancel(text):
+    low = (text or "").lower()
+    return any(k in low for k in CANCEL_MARKERS_EN) or any(k in (text or "") for k in CANCEL_MARKERS_AR)
+
+
+def looks_like_name(text):
+    """Accept 1-4 words of letters only, none of them obvious non-name words."""
+    if not text:
+        return False
+    s = text.strip()
+    if "?" in s or "؟" in s or re.search(r"\d", normalize_digits(s)):
+        return False
+    words = [w.strip(".,!،") for w in s.split()]
+    if not 1 <= len(words) <= 4:
+        return False
+    if any(w.lower() in NOT_A_NAME_WORDS for w in words):
+        return False
+    return all(w.replace(".", "").replace("-", "").replace("'", "").isalpha() for w in words if w)
+
+
+def reprompt_booking_step(from_number, session):
+    """Re-ask for whatever the booking flow is waiting on (used after voice notes, images, or unclear answers)."""
+    stage = session.get("booking_stage")
+    if stage == "awaiting_name":
+        msg = t(session,
+                "No problem! I just need your name to request the slot — could you type it here? (Or reply \"later\" to stop.)",
+                "ولا يهمك! بس نحتاج اسمك عشان نطلب الموعد — ممكن تكتبينه هنا؟ (أو اكتبي \"بعدين\" للإلغاء)")
+    else:
+        msg = t(session,
+                "I just need a contact number so our team can send the timings — could you type it here? (Or reply \"later\" to stop.)",
+                "بس نحتاج رقم التواصل عشان الفريق يرسل لك الأوقات — ممكن تكتبينه هنا؟ (أو اكتبي \"بعدين\" للإلغاء)")
+    send_text_message(from_number, msg)
+    schedule_followup_after_bot_message(from_number)
+
 # ---------------------------------------------------------------------------
 # Booking flow (name -> phone -> done)
 # ---------------------------------------------------------------------------
@@ -639,18 +687,40 @@ def start_booking(from_number, session, prefilled_name=None):
 def handle_booking_step(from_number, session, user_text):
     stage = session.get("booking_stage")
 
-    if stage == "awaiting_name":
-        extracted = extract_inline_name(user_text)
-        name = extracted if extracted else user_text.strip()
-        if len(name.split()) > 4:
-            name = name.split()[0]
-        session["booking_name"] = name
-        session["booking_stage"] = "awaiting_phone"
-        first = name.split()[0] if name else ""
+    # Patient backs out mid-booking
+    if wants_to_cancel(user_text):
+        session["booking_stage"] = None
+        session["booking_sent"] = False
         send_text_message(from_number, t(
             session,
-            f"Thanks{(' ' + first) if first else ''}! Please share your contact number and our team will send you the available timings.",
-            f"شكراً{(' ' + first) if first else ''}! ممكن رقم التواصل؟ والفريق راح يرسل لك الأوقات المتاحة.",
+            "No problem at all! Whenever you're ready, just message me and I'll request a slot for you 😊",
+            "ولا يهمك أبداً! متى ما كنتِ جاهزة، راسليني وأطلب لك موعد 😊",
+        ))
+        return True
+
+    if stage == "awaiting_name":
+        extracted = extract_inline_name(user_text)
+        if extracted:
+            name = extracted
+        elif looks_like_name(user_text):
+            name = user_text.strip().strip(".,!،")
+        else:
+            # Not a name ("no question", "how much?", etc.). If it's a real question, let the AI answer
+            # it and then gently come back to the name; otherwise just re-ask.
+            if "?" in user_text or "؟" in user_text or len(user_text.split()) > 4:
+                ai_response = strip_repeat_greeting(
+                    get_groq_response(user_text, session["history"], session.get("arabic_mode")))
+                remember(session, user_text, ai_response)
+                send_text_message(from_number, ai_response)
+            reprompt_booking_step(from_number, session)
+            return True
+        session["booking_name"] = name.title() if not ARABIC_RE.search(name) else name
+        session["booking_stage"] = "awaiting_phone"
+        first = session["booking_name"].split()[0]
+        send_text_message(from_number, t(
+            session,
+            f"Thanks {first}! Please share your contact number and our team will send you the available timings.",
+            f"شكراً {first}! ممكن رقم التواصل؟ والفريق راح يرسل لك الأوقات المتاحة.",
         ))
         schedule_followup_after_bot_message(from_number)
         return True
@@ -658,12 +728,12 @@ def handle_booking_step(from_number, session, user_text):
     if stage == "awaiting_phone":
         phone = extract_phone(user_text)
         if not phone:
-            send_text_message(from_number, t(
-                session,
-                "I just need a contact number so our team can send the timings — could you type it here?",
-                "بس نحتاج رقم التواصل عشان الفريق يرسل لك الأوقات — ممكن تكتبينه هنا؟",
-            ))
-            schedule_followup_after_bot_message(from_number)
+            if "?" in user_text or "؟" in user_text or len(user_text.split()) > 4:
+                ai_response = strip_repeat_greeting(
+                    get_groq_response(user_text, session["history"], session.get("arabic_mode")))
+                remember(session, user_text, ai_response)
+                send_text_message(from_number, ai_response)
+            reprompt_booking_step(from_number, session)
             return True
         session["booking_phone"] = phone
         session["booking_stage"] = "done"
@@ -876,6 +946,10 @@ def receive_message():
 
         # Voice notes, images, stickers etc. (voice-note support comes later)
         session = conversation_store.get(from_number, {})
+        if session.get("booking_stage") in ("awaiting_name", "awaiting_phone"):
+            session["last_user_message_time"] = datetime.now(timezone.utc).timestamp()
+            reprompt_booking_step(from_number, session)
+            return jsonify({"status": "ok"}), 200
         if session.get("arabic_mode"):
             send_text_message(from_number, "حالياً أقدر أرد على الرسائل المكتوبة فقط — ممكن تكتبين سؤالك؟ 😊")
         else:
